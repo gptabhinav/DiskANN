@@ -2,6 +2,8 @@
 // Licensed under the MIT license.
 
 #include <omp.h>
+#include <random>
+#include <unordered_set>
 
 #include <type_traits>
 
@@ -38,7 +40,8 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
       _enable_tags(index_config.enable_tags), _indexingMaxC(DEFAULT_MAXC), _query_scratch(nullptr),
       _pq_dist(index_config.pq_dist_build), _use_opq(index_config.use_opq),
       _filtered_index(index_config.filtered_index), _num_pq_chunks(index_config.num_pq_chunks),
-      _delete_set(new tsl::robin_set<uint32_t>), _conc_consolidate(index_config.concurrent_consolidate)
+      _delete_set(new tsl::robin_set<uint32_t>), _conc_consolidate(index_config.concurrent_consolidate),
+      _init_strategy(index_config.init_strategy), _num_random_init_points(index_config.num_random_init_points)
 {
     if (_dynamic_index && !_enable_tags)
     {
@@ -657,6 +660,12 @@ void Index<T, TagT, LabelT>::load(const char *filename, uint32_t num_threads, ui
         initialize_query_scratch(num_threads, search_l, search_l, (uint32_t)_graph_store->get_max_range_of_graph(),
                                  _indexingMaxC, _dim);
     }
+    
+    // Precompute fixed random points for consistent initialization if using random strategy
+    if (_init_strategy == InitializationStrategy::RANDOM)
+    {
+        precompute_fixed_random_points();
+    }
 }
 
 #ifndef EXEC_ENV_OLS
@@ -753,6 +762,173 @@ template <typename T, typename TagT, typename LabelT> std::vector<uint32_t> Inde
     }
 
     return init_ids;
+}
+
+template <typename T, typename TagT, typename LabelT> 
+std::vector<uint32_t> Index<T, TagT, LabelT>::get_init_ids_with_strategy(const T *query, bool is_search_context)
+{
+    // Use the configured initialization strategy for both construction and search
+    // (Previous version forced construction to use medoid for safety)
+    if (_init_strategy == InitializationStrategy::MEDOID)
+    {
+        return get_init_ids();
+    }
+    
+    // For random strategy (both construction and search)
+    if (_init_strategy == InitializationStrategy::RANDOM)
+    {
+        // Use configurable number of random points
+        size_t num_random_points = std::min(_num_random_init_points, static_cast<size_t>(_nd));
+        return get_random_init_ids(query, num_random_points);
+    }
+    
+    // Fallback to medoid
+    return get_init_ids();
+}
+
+template <typename T, typename TagT, typename LabelT>
+std::vector<uint32_t> Index<T, TagT, LabelT>::get_random_init_ids(const T *query, size_t num_random_points)
+{
+    std::vector<std::pair<float, uint32_t>> candidate_distances;
+    
+    // Use precomputed fixed random points if available, otherwise fallback to dynamic generation
+    std::vector<uint32_t> candidates_to_use;
+    
+    if (!_fixed_random_points.empty() && num_random_points > 0)
+    {
+        // Use precomputed fixed points (up to the requested number)
+        size_t points_to_use = std::min(num_random_points, _fixed_random_points.size());
+        candidates_to_use.reserve(points_to_use);
+        for (size_t i = 0; i < points_to_use; ++i)
+        {
+            candidates_to_use.push_back(_fixed_random_points[i]);
+        }
+    }
+    else
+    {
+        // Fallback: generate random points dynamically (original behavior)
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dist(0, _nd - 1);
+        
+        // Collect random candidates
+        std::unordered_set<uint32_t> selected;
+        while (selected.size() < num_random_points && selected.size() < _nd)
+        {
+            uint32_t candidate = dist(gen);
+            if (selected.find(candidate) == selected.end())
+            {
+                selected.insert(candidate);
+                candidates_to_use.push_back(candidate);
+            }
+        }
+    }
+    
+    // Calculate distances to query for all candidates
+    for (uint32_t candidate : candidates_to_use)
+    {
+        float distance = _data_store->get_distance(query, candidate);
+        candidate_distances.emplace_back(distance, candidate);
+    }
+    
+    // Sort by distance to get the best candidates first
+    std::sort(candidate_distances.begin(), candidate_distances.end());
+    
+    std::vector<uint32_t> init_ids;
+    
+    // Enhanced Strategy: Use multiple good random points as starting candidates
+    // This gives us better search coverage while maintaining randomness benefits
+    
+    // Determine how many of the best random candidates to use
+    // Use a reasonable fraction but ensure we don't overwhelm the search
+    size_t candidates_to_include = std::min(
+        candidate_distances.size(),
+        std::min(static_cast<size_t>(10), (candidate_distances.size() + 1) / 2)  // Use up to 10, or half the candidates
+    );
+    
+    init_ids.reserve(candidates_to_include + _num_frozen_pts);
+    
+    // Add the best random candidates (sorted by distance to query)
+    for (size_t i = 0; i < candidates_to_include; ++i)
+    {
+        init_ids.emplace_back(candidate_distances[i].second);
+    }
+    
+    // Add frozen points as additional starting points
+    for (uint32_t frozen = (uint32_t)_max_points; frozen < _max_points + _num_frozen_pts; frozen++)
+    {
+        init_ids.emplace_back(frozen);
+    }
+    
+    return init_ids;
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::precompute_fixed_random_points()
+{
+    if (_nd == 0) {
+        _fixed_random_points.clear();
+        return;
+    }
+    
+    // Clear any existing fixed points
+    _fixed_random_points.clear();
+    
+    // Use deterministic seed for consistency across runs
+    std::mt19937 gen(42);  // Fixed seed for reproducibility
+    std::uniform_int_distribution<uint32_t> dist(0, _nd - 1);
+    
+    // Select up to _num_random_init_points unique random points
+    std::unordered_set<uint32_t> selected;
+    size_t target_points = std::min(_num_random_init_points, static_cast<size_t>(_nd));
+    
+    while (selected.size() < target_points)
+    {
+        uint32_t candidate = dist(gen);
+        if (selected.find(candidate) == selected.end())
+        {
+            selected.insert(candidate);
+            _fixed_random_points.push_back(candidate);
+        }
+    }
+    
+    diskann::cout << "Precomputed " << _fixed_random_points.size() << " fixed random points for consistent initialization." << std::endl;
+}
+
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::set_search_initialization_strategy(const std::string &strategy, uint32_t num_random_points)
+{
+    InitializationStrategy init_strategy;
+    if (strategy == "medoid")
+    {
+        init_strategy = InitializationStrategy::MEDOID;
+    }
+    else if (strategy == "random")
+    {
+        init_strategy = InitializationStrategy::RANDOM;
+    }
+    else
+    {
+        diskann::cout << "Warning: Unknown strategy '" << strategy << "'. No change made." << std::endl;
+        return;
+    }
+    
+    _init_strategy = init_strategy;
+    _num_random_init_points = num_random_points;
+    
+    // If switching to random strategy, precompute fixed random points
+    if (init_strategy == InitializationStrategy::RANDOM && _nd > 0)
+    {
+        precompute_fixed_random_points();
+    }
+    
+    diskann::cout << "Search initialization strategy set to " 
+                  << (init_strategy == InitializationStrategy::MEDOID ? "MEDOID" : "RANDOM");
+    if (init_strategy == InitializationStrategy::RANDOM)
+    {
+        diskann::cout << " with " << num_random_points << " random points";
+    }
+    diskann::cout << std::endl;
 }
 
 // Find common filter between a node's labels and a given set of labels, while
@@ -996,12 +1172,13 @@ void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t L
                                                         InMemQueryScratch<T> *scratch, bool use_filter,
                                                         uint32_t filteredLindex)
 {
-    const std::vector<uint32_t> init_ids = get_init_ids();
     const std::vector<LabelT> unused_filter_label;
 
     if (!use_filter)
     {
         _data_store->get_vector(location, scratch->aligned_query());
+        // Use configured initialization strategy for construction
+        const std::vector<uint32_t> init_ids = get_init_ids_with_strategy(scratch->aligned_query(), false); // false = construction context
         iterate_to_fixed_point(scratch, Lindex, init_ids, false, unused_filter_label, false);
     }
     else
@@ -1031,7 +1208,9 @@ void Index<T, TagT, LabelT>::search_for_point_and_prune(int location, uint32_t L
         scratch->clear();
 
         _data_store->get_vector(location, scratch->aligned_query());
-        iterate_to_fixed_point(scratch, Lindex, init_ids, false, unused_filter_label, false);
+        // Use configured initialization strategy for construction
+        const std::vector<uint32_t> unfiltered_init_ids = get_init_ids_with_strategy(scratch->aligned_query(), false); // false = construction context
+        iterate_to_fixed_point(scratch, Lindex, unfiltered_init_ids, false, unused_filter_label, false);
 
         for (auto unfiltered_neighbour : scratch->pool())
         {
@@ -1572,6 +1751,12 @@ void Index<T, TagT, LabelT>::build_with_data_populated(const std::vector<TagT> &
     diskann::cout << "Index built with degree: max:" << max << "  avg:" << (float)total / (float)(_nd + _num_frozen_pts)
                   << "  min:" << min << "  count(deg<2):" << cnt << std::endl;
 
+    // Precompute fixed random points for consistent initialization if using random strategy
+    if (_init_strategy == InitializationStrategy::RANDOM)
+    {
+        precompute_fixed_random_points();
+    }
+
     _has_built = true;
 }
 template <typename T, typename TagT, typename LabelT>
@@ -1992,11 +2177,11 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::search(const T *query, con
     }
 
     const std::vector<LabelT> unused_filter_label;
-    const std::vector<uint32_t> init_ids = get_init_ids();
 
     std::shared_lock<std::shared_timed_mutex> lock(_update_lock);
 
     _data_store->preprocess_query(query, scratch);
+    const std::vector<uint32_t> init_ids = get_init_ids_with_strategy(query, true); // true = search context
 
     auto retval = iterate_to_fixed_point(scratch, L, init_ids, false, unused_filter_label, true);
 
@@ -2079,12 +2264,14 @@ std::pair<uint32_t, uint32_t> Index<T, TagT, LabelT>::search_with_filters(const 
     }
 
     std::vector<LabelT> filter_vec;
-    std::vector<uint32_t> init_ids = get_init_ids();
-
+    
     std::shared_lock<std::shared_timed_mutex> lock(_update_lock);
     std::shared_lock<std::shared_timed_mutex> tl(_tag_lock, std::defer_lock);
     if (_dynamic_index)
         tl.lock();
+
+    _data_store->preprocess_query(query, scratch);
+    std::vector<uint32_t> init_ids = get_init_ids_with_strategy(query, true); // true = search context
 
     if (_label_to_start_id.find(filter_label) != _label_to_start_id.end())
     {
@@ -2178,11 +2365,10 @@ size_t Index<T, TagT, LabelT>::search_with_tags(const T *query, const uint64_t K
 
     std::shared_lock<std::shared_timed_mutex> ul(_update_lock);
 
-    const std::vector<uint32_t> init_ids = get_init_ids();
-
     //_distance->preprocess_query(query, _data_store->get_dims(),
     // scratch->aligned_query());
     _data_store->preprocess_query(query, scratch);
+    const std::vector<uint32_t> init_ids = get_init_ids_with_strategy(query, true); // true = search context
     if (!use_filters)
     {
         const std::vector<LabelT> unused_filter_label;
