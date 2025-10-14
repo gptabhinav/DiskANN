@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common_includes.h"
+#include "index_config.h"
 
 #ifdef EXEC_ENV_OLS
 #include "aligned_file_reader.h"
@@ -232,6 +233,8 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
 
     virtual void _set_universal_label(const LabelType universal_label) override;
 
+    virtual void set_search_initialization_strategy(const std::string &strategy, uint32_t num_random_points = 100) override;
+
     // No copy/assign.
     Index(const Index<T, TagT, LabelT> &) = delete;
     Index<T, TagT, LabelT> &operator=(const Index<T, TagT, LabelT> &) = delete;
@@ -254,6 +257,19 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     // Returns the locations of start point and frozen points suitable for use
     // with iterate_to_fixed_point.
     std::vector<uint32_t> get_init_ids();
+    
+    // Returns initialization points based on configured strategy for both construction and search
+    // Uses the configured _init_strategy (MEDOID or RANDOM) regardless of context
+    std::vector<uint32_t> get_init_ids_with_strategy(const T *query, bool is_search_context);
+    
+    // Returns multiple good random initialization points, selects best candidates from random set
+    std::vector<uint32_t> get_random_init_ids(const T *query, size_t num_random_points);
+
+    // Precompute fixed set of random points for consistent initialization
+    void precompute_fixed_random_points();
+
+    // Override initialization strategy for search operations (does not affect saved index)
+    void set_search_initialization_strategy(InitializationStrategy strategy, size_t num_random_points = 100);
 
     // The query to use is placed in scratch->aligned_query
     std::pair<uint32_t, uint32_t> iterate_to_fixed_point(InMemQueryScratch<T> *scratch, const uint32_t Lindex,
@@ -372,6 +388,11 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     bool _enable_tags = false;
     bool _normalize_vecs = false; // Using normalied L2 for cosine.
     bool _deletes_enabled = false;
+
+    // Initialization Strategy Support
+    InitializationStrategy _init_strategy = InitializationStrategy::MEDOID;
+    size_t _num_random_init_points = 100;  // Number of random points to consider
+    std::vector<uint32_t> _fixed_random_points; // Precomputed fixed set of random points for consistent initialization
 
     // Filter Support
 

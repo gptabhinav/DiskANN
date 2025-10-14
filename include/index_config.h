@@ -1,7 +1,12 @@
 #pragma once
 
+#include <memory>
+
 #include "common_includes.h"
 #include "parameters.h"
+#include "distance.h"
+#include "ann_exception.h"
+#include "logger.h"
 
 namespace diskann
 {
@@ -15,10 +20,18 @@ enum class GraphStoreStrategy
     MEMORY
 };
 
+enum class InitializationStrategy
+{
+    MEDOID,     // Use computed medoid/frozen points (default)
+    RANDOM      // Use random points, select closest to query
+};
+
 struct IndexConfig
 {
     DataStoreStrategy data_strategy;
     GraphStoreStrategy graph_strategy;
+    InitializationStrategy init_strategy;
+    size_t num_random_init_points;
 
     Metric metric;
     size_t dimension;
@@ -44,16 +57,17 @@ struct IndexConfig
     std::shared_ptr<IndexSearchParams> index_search_params;
 
   private:
-    IndexConfig(DataStoreStrategy data_strategy, GraphStoreStrategy graph_strategy, Metric metric, size_t dimension,
-                size_t max_points, size_t num_pq_chunks, size_t num_frozen_points, bool dynamic_index, bool enable_tags,
-                bool pq_dist_build, bool concurrent_consolidate, bool use_opq, bool filtered_index,
-                std::string &data_type, const std::string &tag_type, const std::string &label_type,
+    IndexConfig(DataStoreStrategy data_strategy, GraphStoreStrategy graph_strategy, InitializationStrategy init_strategy, 
+                size_t num_random_init_points, Metric metric, size_t dimension, size_t max_points, size_t num_pq_chunks, 
+                size_t num_frozen_points, bool dynamic_index, bool enable_tags, bool pq_dist_build, bool concurrent_consolidate, 
+                bool use_opq, bool filtered_index, std::string &data_type, const std::string &tag_type, const std::string &label_type,
                 std::shared_ptr<IndexWriteParameters> index_write_params,
                 std::shared_ptr<IndexSearchParams> index_search_params)
-        : data_strategy(data_strategy), graph_strategy(graph_strategy), metric(metric), dimension(dimension),
-          max_points(max_points), dynamic_index(dynamic_index), enable_tags(enable_tags), pq_dist_build(pq_dist_build),
-          concurrent_consolidate(concurrent_consolidate), use_opq(use_opq), filtered_index(filtered_index),
-          num_pq_chunks(num_pq_chunks), num_frozen_pts(num_frozen_points), label_type(label_type), tag_type(tag_type),
+        : data_strategy(data_strategy), graph_strategy(graph_strategy), init_strategy(init_strategy), 
+          num_random_init_points(num_random_init_points), metric(metric), dimension(dimension), max_points(max_points), 
+          dynamic_index(dynamic_index), enable_tags(enable_tags), pq_dist_build(pq_dist_build), 
+          concurrent_consolidate(concurrent_consolidate), use_opq(use_opq), filtered_index(filtered_index), 
+          num_pq_chunks(num_pq_chunks), num_frozen_pts(num_frozen_points), label_type(label_type), tag_type(tag_type), 
           data_type(data_type), index_write_params(index_write_params), index_search_params(index_search_params)
     {
     }
@@ -81,6 +95,18 @@ class IndexConfigBuilder
     IndexConfigBuilder &with_data_load_store_strategy(DataStoreStrategy data_strategy)
     {
         this->_data_strategy = data_strategy;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_initialization_strategy(InitializationStrategy init_strategy)
+    {
+        this->_init_strategy = init_strategy;
+        return *this;
+    }
+
+    IndexConfigBuilder &with_num_random_init_points(size_t num_points)
+    {
+        this->_num_random_init_points = num_points;
         return *this;
     }
 
@@ -219,10 +245,10 @@ class IndexConfigBuilder
             _num_frozen_pts = 1;
         }
 
-        return IndexConfig(_data_strategy, _graph_strategy, _metric, _dimension, _max_points, _num_pq_chunks,
-                           _num_frozen_pts, _dynamic_index, _enable_tags, _pq_dist_build, _concurrent_consolidate,
-                           _use_opq, _filtered_index, _data_type, _tag_type, _label_type, _index_write_params,
-                           _index_search_params);
+        return IndexConfig(_data_strategy, _graph_strategy, _init_strategy, _num_random_init_points, _metric, _dimension, 
+                           _max_points, _num_pq_chunks, _num_frozen_pts, _dynamic_index, _enable_tags, _pq_dist_build, 
+                           _concurrent_consolidate, _use_opq, _filtered_index, _data_type, _tag_type, _label_type, 
+                           _index_write_params, _index_search_params);
     }
 
     IndexConfigBuilder(const IndexConfigBuilder &) = delete;
@@ -231,6 +257,8 @@ class IndexConfigBuilder
   private:
     DataStoreStrategy _data_strategy;
     GraphStoreStrategy _graph_strategy;
+    InitializationStrategy _init_strategy = InitializationStrategy::MEDOID;
+    size_t _num_random_init_points = 100;  // Default to 100
 
     Metric _metric;
     size_t _dimension;

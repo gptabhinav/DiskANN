@@ -101,6 +101,8 @@ class AbstractIndex
 
     virtual void optimize_index_layout() = 0;
 
+    virtual void set_search_initialization_strategy(const std::string &strategy, uint32_t num_random_points = 100) = 0;
+
     // memory should be allocated for vec before calling this function
     template <typename tag_type, typename data_type> int get_vector_by_tag(tag_type &tag, data_type *vec);
 
