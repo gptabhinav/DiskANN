@@ -24,8 +24,8 @@ namespace po = boost::program_options;
 
 int main(int argc, char **argv)
 {
-    std::string data_type, dist_fn, data_path, index_path_prefix, label_file, universal_label, label_type;
-    uint32_t num_threads, R, L, Lf, build_PQ_bytes;
+    std::string data_type, dist_fn, data_path, index_path_prefix, label_file, universal_label, label_type, init_strategy;
+    uint32_t num_threads, R, L, Lf, build_PQ_bytes, num_random_init_points;
     float alpha;
     bool use_pq_build, use_opq;
 
@@ -70,6 +70,10 @@ int main(int argc, char **argv)
                                        program_options_utils::FILTERED_LBUILD);
         optional_configs.add_options()("label_type", po::value<std::string>(&label_type)->default_value("uint"),
                                        program_options_utils::LABEL_TYPE_DESCRIPTION);
+        optional_configs.add_options()("init_strategy", po::value<std::string>(&init_strategy)->default_value("medoid"),
+                                       "Initialization strategy for both index construction and search: 'medoid' (default) or 'random'.");
+        optional_configs.add_options()("num_random_init_points", po::value<uint32_t>(&num_random_init_points)->default_value(100),
+                                       "Number of random points to consider when using random initialization (default: 100)");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -132,6 +136,18 @@ int main(int argc, char **argv)
                                  .with_label_file(label_file)
                                  .with_save_path_prefix(index_path_prefix)
                                  .build();
+        // Parse initialization strategy for both construction and search
+        diskann::InitializationStrategy strategy = diskann::InitializationStrategy::MEDOID;
+        if (init_strategy == "random") {
+            strategy = diskann::InitializationStrategy::RANDOM;
+            diskann::cout << "Using RANDOM initialization strategy for both index construction and search operations" << std::endl;
+        } else if (init_strategy == "medoid") {
+            strategy = diskann::InitializationStrategy::MEDOID;
+            diskann::cout << "Using MEDOID initialization strategy for both index construction and search operations" << std::endl;
+        } else {
+            diskann::cerr << "Unknown initialization strategy: " << init_strategy << ". Using MEDOID as default." << std::endl;
+        }
+
         auto config = diskann::IndexConfigBuilder()
                           .with_metric(metric)
                           .with_dimension(data_dim)
@@ -146,6 +162,8 @@ int main(int argc, char **argv)
                           .is_use_opq(use_opq)
                           .is_pq_dist_build(use_pq_build)
                           .with_num_pq_chunks(build_PQ_bytes)
+                          .with_initialization_strategy(strategy)
+                          .with_num_random_init_points(num_random_init_points)
                           .build();
 
         auto index_factory = diskann::IndexFactory(config);
