@@ -4,6 +4,7 @@
 #include <omp.h>
 #include <random>
 #include <unordered_set>
+#include <chrono>
 
 #include <type_traits>
 
@@ -661,11 +662,12 @@ void Index<T, TagT, LabelT>::load(const char *filename, uint32_t num_threads, ui
                                  _indexingMaxC, _dim);
     }
     
-    // Precompute fixed random points for consistent initialization if using random strategy
-    if (_init_strategy == InitializationStrategy::RANDOM)
-    {
-        precompute_fixed_random_points();
-    }
+    // Skip precomputing fixed random points for dynamic random experiment
+    // if (_init_strategy == InitializationStrategy::RANDOM)
+    // {
+    //     precompute_fixed_random_points();
+    // }
+    diskann::cout << "Dynamic random initialization enabled - new random points each query!" << std::endl;
 }
 
 #ifndef EXEC_ENV_OLS
@@ -791,36 +793,25 @@ std::vector<uint32_t> Index<T, TagT, LabelT>::get_random_init_ids(const T *query
 {
     std::vector<std::pair<float, uint32_t>> candidate_distances;
     
-    // Use precomputed fixed random points if available, otherwise fallback to dynamic generation
+    // Generate truly random points each time (experiment mode)
     std::vector<uint32_t> candidates_to_use;
     
-    if (!_fixed_random_points.empty() && num_random_points > 0)
+    // Use current time + thread id for truly random seed each call
+    std::random_device rd;
+    auto now = std::chrono::high_resolution_clock::now();
+    auto time_seed = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    std::mt19937 gen(static_cast<uint32_t>(time_seed ^ rd()));
+    std::uniform_int_distribution<uint32_t> dist(0, _nd - 1);
+    
+    // Collect random candidates (different each time)
+    std::unordered_set<uint32_t> selected;
+    while (selected.size() < num_random_points && selected.size() < _nd)
     {
-        // Use precomputed fixed points (up to the requested number)
-        size_t points_to_use = std::min(num_random_points, _fixed_random_points.size());
-        candidates_to_use.reserve(points_to_use);
-        for (size_t i = 0; i < points_to_use; ++i)
+        uint32_t candidate = dist(gen);
+        if (selected.find(candidate) == selected.end())
         {
-            candidates_to_use.push_back(_fixed_random_points[i]);
-        }
-    }
-    else
-    {
-        // Fallback: generate random points dynamically (original behavior)
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<uint32_t> dist(0, _nd - 1);
-        
-        // Collect random candidates
-        std::unordered_set<uint32_t> selected;
-        while (selected.size() < num_random_points && selected.size() < _nd)
-        {
-            uint32_t candidate = dist(gen);
-            if (selected.find(candidate) == selected.end())
-            {
-                selected.insert(candidate);
-                candidates_to_use.push_back(candidate);
-            }
+            selected.insert(candidate);
+            candidates_to_use.push_back(candidate);
         }
     }
     
@@ -916,11 +907,12 @@ void Index<T, TagT, LabelT>::set_search_initialization_strategy(const std::strin
     _init_strategy = init_strategy;
     _num_random_init_points = num_random_points;
     
-    // If switching to random strategy, precompute fixed random points
-    if (init_strategy == InitializationStrategy::RANDOM && _nd > 0)
-    {
-        precompute_fixed_random_points();
-    }
+    // Skip precomputing fixed random points for dynamic experiment
+    // if (init_strategy == InitializationStrategy::RANDOM && _nd > 0)
+    // {
+    //     precompute_fixed_random_points();
+    // }
+    diskann::cout << "Dynamic random mode - will generate new random points for each query!" << std::endl;
     
     diskann::cout << "Search initialization strategy set to " 
                   << (init_strategy == InitializationStrategy::MEDOID ? "MEDOID" : "RANDOM");
@@ -1751,11 +1743,12 @@ void Index<T, TagT, LabelT>::build_with_data_populated(const std::vector<TagT> &
     diskann::cout << "Index built with degree: max:" << max << "  avg:" << (float)total / (float)(_nd + _num_frozen_pts)
                   << "  min:" << min << "  count(deg<2):" << cnt << std::endl;
 
-    // Precompute fixed random points for consistent initialization if using random strategy
-    if (_init_strategy == InitializationStrategy::RANDOM)
-    {
-        precompute_fixed_random_points();
-    }
+    // Skip precomputing fixed random points for dynamic random experiment  
+    // if (_init_strategy == InitializationStrategy::RANDOM)
+    // {
+    //     precompute_fixed_random_points();
+    // }
+    diskann::cout << "Dynamic random initialization enabled - new random points each build!" << std::endl;
 
     _has_built = true;
 }
